@@ -1,6 +1,70 @@
 import csv
 import time
+import os
+from db import get_conn, init_db
 
+POLL_SECONDS = 5
+WORK_SECONDS = 30
+
+def claim_one_task(conn, consumer_id: str):
+    conn.execute("BEGIN IMMEDIATE;")
+
+    row = conn.execute("""
+        SELECT id
+        FROM tasks
+        WHERE status = 'pending'
+        ORDER BY id
+        LIMIT 1;
+    """).fetchone()
+
+    if row is None:
+        conn.execute("COMMIT;")
+        return None
+
+    task_id = row["id"]
+    updated = conn.execute("""
+        UPDATE tasks
+        SET status = 'in_progress',
+            started_at = datetime('now'),
+            consumer_id = ?
+        WHERE id = ?
+          AND status = 'pending';
+    """, (consumer_id, task_id)).rowcount
+
+    conn.execute("COMMIT;")
+
+    if updated == 0:
+        return None
+
+    return task_id
+
+def mark_done(conn, task_id: int):
+    conn.execute("""
+        UPDATE tasks
+        SET status = 'done',
+            finished_at = datetime('now')
+        WHERE id = ?;
+    """, (task_id,))
+
+def consumer_loop(consumer_id: str):
+    conn = get_conn()
+    print(f"[{consumer_id}] started")
+
+    while True:
+        try:
+            task_id = claim_one_task(conn, consumer_id)
+            if task_id is None:
+                time.sleep(POLL_SECONDS)
+                continue
+
+            print(f"[{consumer_id}] claimed task {task_id} -> working {WORK_SECONDS}s")
+            time.sleep(WORK_SECONDS)
+            mark_done(conn, task_id)
+            print(f"[{consumer_id}] done task {task_id}")
+
+        except Exception as e:
+            print(f"[{consumer_id}] ERROR:", e)
+            time.sleep(POLL_SECONDS)
 
 def update_task_status(task_id, new_status):
     tasks = []
@@ -42,4 +106,6 @@ def consumer():
 
 
 if __name__ == "__main__":
-    consumer()
+    init_db()
+    consumer_id = os.environ.get("CONSUMER_ID", f"consumer-{os.getpid()}")
+    consumer_loop(consumer_id)
